@@ -15,7 +15,8 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from data import (
     select_and_load_dataset,
-    get_pseduo_dataloader
+    get_pseduo_dataloader,
+    PositionalEmbedder
 )
 from utils import (
     is_main_process,
@@ -25,6 +26,7 @@ from utils import (
     get_world_size
 )
 from model import R2LEngine
+from model.R2L import R2L
 
 @click.command()
 @click.option('--project_name', type=str)
@@ -87,6 +89,32 @@ def main(**kwargs):
     torch.backends.cudnn.benchmark = True
     # setup args
     args = edict(kwargs)
+    print(args)
+
+    embedder = PositionalEmbedder(
+        args.multires,
+        'cpu',
+        True
+    )
+
+    model = R2L(
+        args,
+        3*args.n_sample_per_ray*embedder.embed_dim,
+        3
+    )
+
+    # print model flops
+    from ptflops import get_model_complexity_info
+
+    input_size = (312, 100, 100)  # (channels, height, width)
+
+    macs, params = get_model_complexity_info(model, input_size, as_strings=True, print_per_layer_stat=True)
+
+    print(f"Number of FLOPs: {macs}")
+    print(f"Number of parameters: {params}")
+
+
+    return
     init_distributed_mode(args)
     device = get_rank()
     world_size = get_world_size()
@@ -117,7 +145,8 @@ def main(**kwargs):
     video_poses = dataset_info.render_poses
    
     logger = logging.getLogger(__name__)
-    pprint(args)    
+    pprint(args)
+
     # model
     engine = R2LEngine(dataset_info, logger, args)
     if args.export_onnx:
@@ -197,6 +226,6 @@ def main(**kwargs):
         
         
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    with logging_redirect_tqdm():
-        main()
+    # logging.basicConfig(level=logging.INFO)
+    # with logging_redirect_tqdm():
+    main()
