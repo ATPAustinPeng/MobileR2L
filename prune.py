@@ -29,9 +29,11 @@ from utils import (
 from model import R2LEngine
 from model.R2L import R2L
 from model.R2LCFG import R2LCFG
+from model.channel_selection import channel_selection
 
 # for pruning
 import torch.nn as nn
+import numpy as np
 
 @click.command()
 @click.option('--project_name', type=str)
@@ -108,12 +110,12 @@ def main(**kwargs):
     # get_model_macs_and_flops(model, input_size)
     # get_model_output_shape(model, input_size)
 
-    # load model weights into R2L
-    ckpt = torch.load(args.ckpt_dir)
-    load_ckpt(model, ckpt)
+    # # load model weights into R2L
+    # ckpt = torch.load(args.ckpt_dir)
+    # load_ckpt(model, ckpt)
 
-    for name, param in model.named_parameters():
-        print(name, param.size())
+    # for name, param in model.named_parameters():
+    #     print(name, param.size())
 
     init_distributed_mode(args)
     device = get_rank()
@@ -149,33 +151,39 @@ def main(**kwargs):
 
     # model
     engine = R2LEngine(dataset_info, logger, args)
-    # if args.export_onnx:
-    #     engine.export_onnx()
-    #     exit(0)
 
-    # # perform testing preprune and save onnx
-    # if args.run_render:
-    #     logger.info('Starting rendering. \n')
-    #     # render testset
-    #     engine.render(
-    #         c2ws=test_poses,
-    #         gt_imgs=test_images,
-    #         global_step=0,
-    #         save_rendering=True
-    #     )
-    #     # render videos
-    #     if video_poses is not None:
-    #         engine.render(
-    #             c2ws=video_poses,
-    #             gt_imgs=None,
-    #             global_step=0,
-    #             save_video=True
-    #         )
-    #     engine.export_onnx(extra_path="-preprune")
+    print(engine.engine)
+    return
+    # ckpt = torch.load(args.ckpt_dir)
+    # load_ckpt(engine.engine, ckpt)
+
+    if args.export_onnx:
+        engine.export_onnx()
+        exit(0)
+
+    # perform testing preprune and save onnx
+    if args.run_render:
+        logger.info('Starting rendering. \n')
+        # render testset
+        engine.render(
+            c2ws=test_poses,
+            gt_imgs=test_images,
+            global_step=0,
+            save_rendering=True
+        )
+        # render videos
+        if video_poses is not None:
+            engine.render(
+                c2ws=video_poses,
+                gt_imgs=None,
+                global_step=0,
+                save_video=True
+            )
+        engine.export_onnx(extra_path="-preprune")
+        dist.barrier()
     
     # TODO: PERFORM PRUNING
-    dist.barrier()
-
+    # https://github.com/Eric-mingjie/rethinking-network-pruning/blob/master/cifar/network-slimming/resprune.py
     logger.info("READY FOR PRUNING")
     prune_percentage = 30
     model = engine.engine
@@ -227,18 +235,12 @@ def main(**kwargs):
     newmodel = newengine.engine
     print(newmodel) # print model architecture (should match the first print)
 
-    # embedder = PositionalEmbedder(args.multires, 'cpu', True)
-    # newmodel = R2L(args, 3 * args.n_sample_per_ray * embedder.embed_dim, 3)
-
     num_parameters = sum([param.nelement() for param in newmodel.parameters()])
     savepath = os.path.join(os.path.dirname(args.ckpt_dir), "prune.txt")
     with open(savepath, "w") as fp:
         fp.write("Configuration: \n"+str(cfg)+"\n")
         fp.write("Number of parameters: \n"+str(num_parameters)+"\n")
-        fp.write("Test accuracy: \n"+str(acc))
-
-    print("saved prune.txt")
-
+        fp.write("Test PSNR: \n"+str(engine.buffer['best_psnr']))
 
     old_modules = list(model.modules())
     new_modules = list(newmodel.modules())
@@ -250,12 +252,12 @@ def main(**kwargs):
     for layer_id in range(len(old_modules)):
         m0 = old_modules[layer_id]
         m1 = new_modules[layer_id]
-        if isinstance(m0, nn.BatchNorm2d):
+        if isinstance(m0, nn.BatchNorm2d) or isinstance(m0, nn.SyncBatchNorm):
             idx1 = np.squeeze(np.argwhere(np.asarray(end_mask.cpu().numpy())))
             if idx1.size == 1:
                 idx1 = np.resize(idx1,(1,))
 
-            if isinstance(old_modules[layer_id + 1], channel_selection.channel_selection):
+            if isinstance(old_modules[layer_id + 1], channel_selection):
                 # If the next layer is the channel selection layer, then the current batchnorm 2d layer won't be pruned.
                 m1.weight.data = m0.weight.data.clone()
                 m1.bias.data = m0.bias.data.clone()
@@ -285,7 +287,7 @@ def main(**kwargs):
                 m1.weight.data = m0.weight.data.clone()
                 conv_count += 1
                 continue
-            if isinstance(old_modules[layer_id-1], channel_selection.channel_selection) or isinstance(old_modules[layer_id-1], nn.BatchNorm2d):
+            if isinstance(old_modules[layer_id-1], channel_selection) or isinstance(old_modules[layer_id-1], nn.BatchNorm2d) or isinstance(old_modules[layer_id-1], nn.SyncBatchNorm):
                 # This convers the convolutions in the residual block.
                 # The convolutions are either after the channel selection layer or after the batch normalization layer.
                 conv_count += 1
@@ -316,6 +318,12 @@ def main(**kwargs):
             m1.weight.data = m0.weight.data[:, idx0].clone()
             m1.bias.data = m0.bias.data.clone()
 
+    print("successfully pruned model")
+
+    print(newmodel)
+    print_nonzeros(newmodel)
+
+    engine = newengine
     # TODO save pruned model
 
     # train pruned model
@@ -332,7 +340,7 @@ def main(**kwargs):
             range(
                 set_epoch_num(
                     global_step,
-                    args.num_iters,
+                    global_step + args.num_iters,# args.num_iters, #modify to train for a set number of iterations
                     args.batch_size,
                     num_pseudo,
                     world_size
@@ -372,7 +380,19 @@ def main(**kwargs):
                     dist.barrier()
 
         engine.export_onnx()
-    
+
+def print_nonzeros(model):
+    nonzero = total = 0
+    for name, p in model.named_parameters():
+        tensor = p.data.cpu().numpy()
+        nz_count = np.count_nonzero(tensor)
+        total_params = np.prod(tensor.shape)
+        nonzero += nz_count
+        total += total_params
+        print(f'{name:20} | nonzeros = {nz_count:7} / {total_params:7} ({100 * nz_count / total_params:6.2f}%) | total_pruned = {total_params - nz_count :7} | shape = {tensor.shape}')
+    print(f'alive: {nonzero}, pruned : {total - nonzero}, total: {total}, Compression rate : {total/nonzero:10.2f}x  ({100 * (total-nonzero) / total:6.2f}% pruned)')
+    return (round((nonzero/total)*100,1))
+
 def load_ckpt(model, ckpt):
     model_dataparallel = False
     for name, module in model.named_modules():

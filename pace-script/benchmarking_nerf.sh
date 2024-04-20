@@ -34,5 +34,6 @@ OMP_NUM_THREADS=$omp_num_threads python3 -m torch.distributed.launch --nproc_per
     --scene $scene \
     --i_weights 1000 \
     --i_testset 10000 \
+    --i_video 50000 \
     --amp \
     --lrate 0.0005

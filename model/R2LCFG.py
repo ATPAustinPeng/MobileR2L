@@ -14,7 +14,7 @@ class ResnetBlock(nn.Module):
         padding_type='zero',
         norm_layer=nn.BatchNorm2d, 
         use_dropout=False, 
-        use_bias=True, 
+        use_bias=False, #remove bias to help ease of pruning
         act=None
     ):
         
