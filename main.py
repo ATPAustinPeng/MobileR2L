@@ -15,8 +15,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from data import (
     select_and_load_dataset,
-    get_pseduo_dataloader,
-    PositionalEmbedder
+    get_pseduo_dataloader
 )
 from utils import (
     is_main_process,
@@ -26,7 +25,6 @@ from utils import (
     get_world_size
 )
 from model import R2LEngine
-from model.R2L import R2L
 
 @click.command()
 @click.option('--project_name', type=str)
@@ -89,32 +87,6 @@ def main(**kwargs):
     torch.backends.cudnn.benchmark = True
     # setup args
     args = edict(kwargs)
-    print(args)
-
-    embedder = PositionalEmbedder(
-        args.multires,
-        'cpu',
-        True
-    )
-
-    model = R2L(
-        args,
-        3*args.n_sample_per_ray*embedder.embed_dim,
-        3
-    )
-
-    # print model flops
-    from ptflops import get_model_complexity_info
-
-    input_size = (312, 100, 100)  # (channels, height, width)
-
-    macs, params = get_model_complexity_info(model, input_size, as_strings=True, print_per_layer_stat=True)
-
-    print(f"Number of FLOPs: {macs}")
-    print(f"Number of parameters: {params}")
-
-
-    return
     init_distributed_mode(args)
     device = get_rank()
     world_size = get_world_size()
@@ -152,7 +124,7 @@ def main(**kwargs):
     if args.export_onnx:
         engine.export_onnx()
         exit(0)
-        
+
     if args.run_render:
         logger.info('Starting rendering. \n')
         # render testset
@@ -196,6 +168,7 @@ def main(**kwargs):
             disable=not is_main_process()
         ) as pbar:
             for i in pbar:
+                print(f"EPOCH {i} | GLOBAL_STEP {global_step}")
                 pseudo_dataloader.sampler.set_epoch(i)
                 for _, (rays_o, rays_d, target_rgb) in enumerate(pseudo_dataloader):
                     global_step += 1
@@ -221,11 +194,12 @@ def main(**kwargs):
                             save_rendering=(global_step % args.i_save_rendering == 0)
                         )  
                     pbar.set_postfix(iter=global_step, loss=loss.item(), psnr=psnr, best_psnr=best_psnr) 
-                    dist.barrier() 
+                    dist.barrier()
+
         engine.export_onnx()
         
         
 if __name__ == '__main__':
-    # logging.basicConfig(level=logging.INFO)
-    # with logging_redirect_tqdm():
-    main()
+    logging.basicConfig(level=logging.INFO)
+    with logging_redirect_tqdm():
+        main()

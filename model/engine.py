@@ -10,13 +10,15 @@ from tqdm import tqdm
 import pytz
 import lpips 
 import imageio
+import logging
 from datetime import datetime
 from easydict import EasyDict as edict
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from annotation import *
-from .R2L import R2L
+# from .R2L import R2L
+from .R2LCFG import R2LCFG as R2L
 from lens import (
     convertModel,
     Sampler,
@@ -52,7 +54,7 @@ class R2LEngine():
         args
 ):
         self.args = args
-        self.logger = logger
+        self.logger = logging.getLogger(__name__)#logger
         self.dataset_info = dataset_info
         self.sampler = PointSampler(dataset_info)
         self.embedder = PositionalEmbedder(
@@ -79,10 +81,15 @@ class R2LEngine():
             3*self.args.n_sample_per_ray*self.embedder.embed_dim,
             3
         ).to(self.dataset_info.device)
+
+        # TODO: LOAD PRUNED WEIGHTS HERE TO AVOID parallelized vs unparallelized model weight loading errors
+        # for name, module in self.engine.named_modules():
+        #     print(name)
+
         #Todo: opt before or after DDP?
         if self.args.run_train:
             self.engine = nn.SyncBatchNorm.convert_sync_batchnorm(self.engine)     
-            self.engine = DDP(self.engine)
+            self.engine = DDP(self.engine, find_unused_parameters=True)
             if hasattr(self.engine.module, 'input_dim'):
                 self.engine.input_dim = self.engine.module.input_dim
             self.logger.info(f'[Rank {self.dataset_info.device}]: Using Distributed Data Parallel.')
@@ -92,6 +99,7 @@ class R2LEngine():
             lr=self.args.lrate,
             betas=(0.9, 0.999),
         )
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.args.amp)  
         # self.optimizer = torch.optim.Adam(
         #     params=list(self.engine.parameters()),
         #     lr=self.args.lrate,
@@ -124,7 +132,6 @@ class R2LEngine():
                     self.scaler.load_state_dict(ckpt.get('scaler', None))
                 self.logger.info(f'[Rank {self.dataset_info.device}]:Resume optimizer successfully.')
                 
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.args.amp)  
         # Save intrinsics for lens
         self._save_instrinsics()
         
@@ -165,13 +172,15 @@ class R2LEngine():
             if name.startswith('module.'):
                 model_dataparallel = True
                 break
-
+        
         state_dict = ckpt['network_fn_state_dict']
         weights_dataparallel = False
         for k, v in state_dict.items():
             if k.startswith('module.'):
                 weights_dataparallel = True
                 break
+        self.logger.info(f"model dataparallel: {model_dataparallel}")
+        self.logger.info(f"weight dataparallel: {weights_dataparallel}")
         if model_dataparallel and weights_dataparallel or (
                 not model_dataparallel) and (not weights_dataparallel):
             self.engine.load_state_dict(state_dict)
@@ -186,7 +195,8 @@ class R2LEngine():
             'global_step': global_step,
             'best_psnr': best_psnr,
             'best_psnr_step': best_psnr_step,
-            'network_fn_state_dict': undataparallel(self.engine.state_dict()),
+            # 'network_fn_state_dict': undataparallel(self.engine.state_dict()),
+            'network_fn_state_dict': self.engine.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scaler': self.scaler.state_dict() if self.args.amp else None
         }
@@ -252,7 +262,8 @@ class R2LEngine():
         )
         pts = torch.permute(pts, (0, 3, 1, 2))
         with torch.cuda.amp.autocast(enabled=self.args.amp):
-            rgb = self.engine(pts)
+            # pts.shape = torch.Size([10, 312, 100, 100])
+            rgb = self.engine(pts.contiguous()) # try pts.contiguous()
             dim = rgb.shape[1]
             rgb = (
                 torch.permute(rgb, (0, 2, 3, 1))
@@ -458,9 +469,9 @@ class R2LEngine():
         )
 
     @main_process
-    def export_onnx(self):
+    def export_onnx(self, extra_path=""):
         if self.args.ckpt_dir:
-            onnx_path = self.args.ckpt_dir.replace('.tar', '.onnx')         
+            onnx_path = self.args.ckpt_dir.replace('.tar', f'{extra_path}.onnx')
         else:
             onnx_path = f'{self.buffer.weight_dir}/{self.args.project_name}.onnx'
             
@@ -473,33 +484,33 @@ class R2LEngine():
         ml_path = onnx_path.replace('.onnx', '.mlpackage')
         save_ml(self.engine, ml_path, dummy_input)
         
-        if self.args.activation_fn == 'gelu':
-            # Export to relu first then convert to SnapGelu that 
-            # is compatiable with SnapML
-            self.args.activation_fn = 'relu'
-            self.engine = R2L(
-                self.args,
-                3*self.args.n_sample_per_ray*self.embedder.embed_dim,
-                3
-            ).to(self.dataset_info.device)
-            ckpt = torch.load(
-                self.args.ckpt_dir if self.args.ckpt_dir else \
-                        join(f'{self.buffer.exp_dir}/weights/ckpt.tar'),
-                map_location={'cuda:%d' % 0: 'cuda:%d' % self.dataset_info.device} 
-            )
-            self._load_ckpt(ckpt)
-            self.logger.info(f'[Rank {self.dataset_info.device}]: Re-Loadded checkpoint {self.args.ckpt_dir}')
+        # if self.args.activation_fn == 'gelu':
+        #     # Export to relu first then convert to SnapGelu that 
+        #     # is compatiable with SnapML
+        #     self.args.activation_fn = 'relu'
+        #     self.engine = R2L(
+        #         self.args,
+        #         3*self.args.n_sample_per_ray*self.embedder.embed_dim,
+        #         3
+        #     ).to(self.dataset_info.device)
+        #     ckpt = torch.load(
+        #         self.args.ckpt_dir if self.args.ckpt_dir else \
+        #                 join(f'{self.buffer.exp_dir}/weights/ckpt.tar'),
+        #         map_location={'cuda:%d' % 0: 'cuda:%d' % self.dataset_info.device} 
+        #     )
+        #     self._load_ckpt(ckpt)
+        #     self.logger.info(f'[Rank {self.dataset_info.device}]: Re-Loadded checkpoint {self.args.ckpt_dir}')
         
-        save_onnx(self.engine, onnx_path, dummy_input)
+        # save_onnx(self.engine, onnx_path, dummy_input)
         
-        if self.args.convert_snap_gelu:
-            convertModel(
-                onnx_path,
-                onnx_path.replace(
-                    '.onnx',
-                    '_SnapGELU.onnx'
-                )
-            )
+        # if self.args.convert_snap_gelu:
+        #     convertModel(
+        #         onnx_path,
+        #         onnx_path.replace(
+        #             '.onnx',
+        #             '_SnapGELU.onnx'
+        #         )
+        #     )
             
         # Optional: exporting tflite
         #pip install git+https://github.com/alibaba/TinyNeuralNetwork.git
@@ -521,7 +532,7 @@ class R2LEngine():
         near = self.dataset_info.near
         far = self.dataset_info.far
         focal = self.dataset_info.focal.item()
-        
+
         # embedder
         weights = (
             2 ** torch.linspace(0, multires-1, steps=multires)
@@ -546,7 +557,8 @@ class R2LEngine():
                         }
         )
         del emb
-        
+
+
         #sampler
         shift = 0.5
         i, j = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1,H))

@@ -1,5 +1,6 @@
 nGPU=$1
 scene=$2
+ckpt_dir=$3
 ncpu_cores=$(nproc --all)
 omp_num_threads=$((ncpu_cores / nGPU))
 
@@ -20,4 +21,6 @@ OMP_NUM_THREADS=$omp_num_threads python3 -m torch.distributed.launch --nproc_per
     --i_weights 1000 \
     --i_testset 10000 \
     --amp \
-    --lrate 0.0005
+    --lrate 0.0005 \
+    --ckpt_dir $ckpt_dir \
+    --resume

@@ -1,5 +1,5 @@
 import torch.nn as nn
-
+from .channel_selection import channel_selection
 
 class ResnetBlock(nn.Module):
     """
@@ -9,6 +9,7 @@ class ResnetBlock(nn.Module):
     def __init__(
         self, 
         dim,
+        cfg,
         kernel_size=1, 
         padding_type='zero',
         norm_layer=nn.BatchNorm2d, 
@@ -25,13 +26,14 @@ class ResnetBlock(nn.Module):
         """
         super(ResnetBlock, self).__init__()
         self.conv_block = self.build_conv_block(
-            dim, kernel_size, padding_type,
+            dim, cfg, kernel_size, padding_type,
             norm_layer, use_dropout, use_bias, act
         )
 
     def build_conv_block(
         self, 
-        dim, 
+        dim,
+        cfg,
         kernel_size, 
         padding_type, 
         norm_layer, 
@@ -49,6 +51,12 @@ class ResnetBlock(nn.Module):
         Returns a conv block (with a conv layer, a normalization layer, and a non-linearity layer)
         """
         conv_block = []
+
+        ########## ADDING LAYERS FOR CHANNEL-WISE STRUCTURED PRUNING ##########
+        conv_block += [norm_layer(dim, momentum=0.1)]
+        conv_block += [channel_selection(dim)]
+        #######################################################################
+
         p = 0
         if padding_type == 'reflect':
             conv_block += [nn.ReflectionPad2d(1)]
@@ -58,9 +66,9 @@ class ResnetBlock(nn.Module):
             p = 0
         else:
             raise NotImplementedError('padding [%s] is not implemented' % padding_type)
-        conv_block += [nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=p, bias=use_bias)]
+        conv_block += [nn.Conv2d(cfg[0], cfg[1], kernel_size=kernel_size, padding=p, bias=use_bias)]
         if norm_layer:
-            conv_block += [norm_layer(dim, momentum=0.1)]
+            conv_block += [norm_layer(cfg[1], momentum=0.1)]
         if act:
             conv_block += [act]
         if use_dropout:
@@ -75,9 +83,9 @@ class ResnetBlock(nn.Module):
             p = 0
         else:
             raise NotImplementedError('padding [%s] is not implemented' % padding_type)
-        conv_block += [nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=p, bias=use_bias)]
-        if norm_layer:
-            conv_block += [norm_layer(dim, momentum=0.1)]
+        conv_block += [nn.Conv2d(cfg[1], dim, kernel_size=kernel_size, padding=p, bias=use_bias)]
+        # if norm_layer:
+        #     conv_block += [norm_layer(dim, momentum=0.1)]
 
         return nn.Sequential(*conv_block)
 
@@ -98,15 +106,17 @@ def get_activation(act):
         raise NotImplementedError
     return func
 
-class R2L(nn.Module):
+class R2LCFG(nn.Module):
     def __init__(
         self,
         args,
         input_dim, 
-        output_dim
+        output_dim,
+        cfg=None
     ):
-        super(R2L, self).__init__()
-        self.args =  args
+        super(R2LCFG, self).__init__()
+
+        self.args = args
         self.input_dim = input_dim
         D, W = args.netdepth, args.netwidth
         Ws = [W] * (D-1) + [3]
@@ -116,19 +126,41 @@ class R2L(nn.Module):
         )
 
         n_block = (D - 2) // 2 # 2 layers per resblock
-        body = [ResnetBlock(W, act=act) for _ in range(n_block)]
+        n_conv = args.num_conv_layers # 2 conv layers in each sr
+        n_up_block = args.num_sr_blocks # 3 sr blocls
+        kernels = args.sr_kernel
+
+        if cfg is None:
+            # head doesn't have batchnorm2d
+            # tail in MobileR2L usecase only has 3 sr blocks * 2 conv blocks
+            # cfg = [[body], [tail]]
+            cfg = [[256, 256] * n_block]
+            cfg += [[kernels[n], kernels[n]] for n in range(n_up_block) for _ in range(n_conv)] # Note: must iterate from outer block -> inner block (or shapes don't match)
+            cfg = [item for sub_list in cfg for item in sub_list]
+            # cfg = [item for subsublist in cfg for sublist in subsublist for item in sublist]
+        cfg_count = 0
+
+        body = []
+        for _ in range(n_block):
+            body += [ResnetBlock(W, cfg[2*cfg_count:2*(cfg_count+1)], act=act)]
+            cfg_count += 1
+        # body = [ResnetBlock(W, cfg[2*n:2*(n+1)] act=act) for n in range(n_block)]
         self.body = nn.Sequential(*body)
             
         if args.use_sr_module:
-            n_conv = args.num_conv_layers # 2 conv layers in each sr
-            n_up_block = args.num_sr_blocks # 3 sr blocls
-            kernels = args.sr_kernel
+            # n_conv = args.num_conv_layers # 2 conv layers in each sr
+            # n_up_block = args.num_sr_blocks # 3 sr blocls
+            # kernels = args.sr_kernel
 
             up_blocks = []
             for i in range(n_up_block - 1):
                 in_dim = Ws[-2] if not i else kernels[i]
                 up_blocks += [nn.ConvTranspose2d(in_dim, kernels[i], 4, stride=2, padding=1)]
-                up_blocks += [ResnetBlock(kernels[i], act=act) for _ in range(n_conv)]
+
+                for _ in range(n_conv):
+                    up_blocks += [ResnetBlock(kernels[i], cfg[2*cfg_count:2*(cfg_count+1)], act=act)]
+                    cfg_count += 1
+                # up_blocks += [ResnetBlock(kernels[i], cfg[2*(n+n_block+i):2*(n+1+n_block+i)], act=act) for n in range(n_conv)]
 
             # hard-coded up-sampling factors
             # 12x for colmap
@@ -140,7 +172,10 @@ class R2L(nn.Module):
                 raise ValueError(f'Undefined dataset type: {args.dataset_type}.')            
         
             up_blocks += [nn.ConvTranspose2d(kernels[1], kernels[-1], k, stride=s, padding=p)]
-            up_blocks += [ResnetBlock(kernels[-1], act=act)  for _ in range(n_conv)]
+            for _ in range(n_conv):
+                up_blocks += [ResnetBlock(kernels[-1], cfg[2*cfg_count:2*(cfg_count+1)], act=act)]
+                cfg_count += 1
+            # up_blocks += [ResnetBlock(kernels[-1], act=act)  for _ in range(n_conv)]
             up_blocks += [nn.Conv2d(kernels[-1], output_dim, 1), nn.Sigmoid()]
             self.tail = nn.Sequential(*up_blocks)
         else:

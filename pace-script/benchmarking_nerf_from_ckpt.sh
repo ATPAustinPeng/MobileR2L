@@ -1,5 +1,21 @@
+#!/bin/bash
+#SBATCH --job-name=benchmarking_nerf.sh
+#SBATCH --output=%x.%j.out
+#SBATCH --error=%x.%j.err
+#SBATCH -t 0-04:00:00
+#SBATCH --gres=gpu:H100:4
+#SBATCH --mem=64GB
+#SBATCH --ntasks-per-node=12
+
+module load anaconda3
+conda deactivate
+conda activate r2l
+
+cd /home/hice1/apeng39/scratch/SENeLF/MobileR2L
+
 nGPU=$1
 scene=$2
+ckpt_dir=$3
 ncpu_cores=$(nproc --all)
 omp_num_threads=$((ncpu_cores / nGPU))
 
@@ -20,4 +36,6 @@ OMP_NUM_THREADS=$omp_num_threads python3 -m torch.distributed.launch --nproc_per
     --i_weights 1000 \
     --i_testset 10000 \
     --amp \
-    --lrate 0.0005
+    --lrate 0.0005 \
+    --ckpt_dir $ckpt_dir \
+    --resume
