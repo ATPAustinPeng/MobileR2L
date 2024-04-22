@@ -18,7 +18,7 @@ scene=$2
 ncpu_cores=$(nproc --all)
 omp_num_threads=$((ncpu_cores / nGPU))
 
-OMP_NUM_THREADS=$omp_num_threads python3 -m torch.distributed.launch --nproc_per_node=$nGPU --use_env main.py \
+OMP_NUM_THREADS=$omp_num_threads python3 -m torch.distributed.launch --nproc_per_node=$nGPU --master_port=25641 --use_env main.py \
     --project_name $scene \
     --dataset_type Blender \
     --pseudo_dir model/teacher/ngp_pl/Pseudo/$scene  \

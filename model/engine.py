@@ -51,7 +51,8 @@ class R2LEngine():
         self,
         dataset_info,
         logger,
-        args
+        args,
+        cfg=None
 ):
         self.args = args
         self.logger = logging.getLogger(__name__)#logger
@@ -62,7 +63,7 @@ class R2LEngine():
             dataset_info.device,
             True
         )
-        self._setup_system()
+        self._setup_system(cfg)
         
         # metrics
         self.ssim = ssim_
@@ -73,13 +74,14 @@ class R2LEngine():
         )
         
         
-    def _setup_system(self):
+    def _setup_system(self, cfg=None):
         #todo: experiment eps
         self._prepare_experiment()
         self.engine = R2L(
             self.args,
             3*self.args.n_sample_per_ray*self.embedder.embed_dim,
-            3
+            3,
+            cfg=cfg
         ).to(self.dataset_info.device)
 
         # TODO: LOAD PRUNED WEIGHTS HERE TO AVOID parallelized vs unparallelized model weight loading errors
@@ -115,22 +117,42 @@ class R2LEngine():
                 'input_dim': self.engine.input_dim,
             }
         )
-        if self.args.ckpt_dir:
-            ckpt = torch.load(
-                self.args.ckpt_dir,
-                map_location={'cuda:%d' % 0: 'cuda:%d' % self.dataset_info.device} 
-            )
-            self._load_ckpt(ckpt)
-            self.logger.info(f'[Rank {self.dataset_info.device}]: Loadded checkpoint {self.args.ckpt_dir}')
-            
-            if self.args.resume:
+
+        if cfg is None:
+            if self.args.ckpt_dir:
+                ckpt = torch.load(
+                    self.args.ckpt_dir,
+                    map_location={'cuda:%d' % 0: 'cuda:%d' % self.dataset_info.device} 
+                )
+                self._load_ckpt(ckpt)
+                self.logger.info(f'[Rank {self.dataset_info.device}]: Loaded checkpoint {self.args.ckpt_dir}')
+                
+                if self.args.resume:
+                    self._register('start', ckpt.get('global_step', 0))
+                    self._register('best_psnr', ckpt.get('best_psnr', 0))
+                    self._register('best_psnr_step', ckpt.get('best_psnr_step', 0))
+                    self.optimizer.load_state_dict(ckpt.get('optimizer_state_dict', None))
+                    if self.args.amp:
+                        self.scaler.load_state_dict(ckpt.get('scaler', None))
+                    self.logger.info(f'[Rank {self.dataset_info.device}]:Resume optimizer successfully.')
+        elif cfg is not None and self.args.prune_resume:
+            if self.args.ckpt_dir:
+                ckpt = torch.load(
+                    self.args.ckpt_dir,
+                    map_location={'cuda:%d' % 0: 'cuda:%d' % self.dataset_info.device} 
+                )
+                self._load_ckpt(ckpt)
+                self.logger.info(f'[Rank {self.dataset_info.device}]: Loaded pruned model checkpoint {self.args.ckpt_dir}')
+
+
                 self._register('start', ckpt.get('global_step', 0))
                 self._register('best_psnr', ckpt.get('best_psnr', 0))
                 self._register('best_psnr_step', ckpt.get('best_psnr_step', 0))
                 self.optimizer.load_state_dict(ckpt.get('optimizer_state_dict', None))
                 if self.args.amp:
                     self.scaler.load_state_dict(ckpt.get('scaler', None))
-                self.logger.info(f'[Rank {self.dataset_info.device}]:Resume optimizer successfully.')
+                self.logger.info(f'[Rank {self.dataset_info.device}]:Resume pruned model optimizer successfully.')
+
                 
         # Save intrinsics for lens
         self._save_instrinsics()
@@ -186,7 +208,6 @@ class R2LEngine():
             self.engine.load_state_dict(state_dict)
         else:
             raise NotImplementedError
-    
     
     @main_process
     def _save_ckpt(self, file_name, best_psnr, best_psnr_step, global_step):
@@ -263,7 +284,7 @@ class R2LEngine():
         pts = torch.permute(pts, (0, 3, 1, 2))
         with torch.cuda.amp.autocast(enabled=self.args.amp):
             # pts.shape = torch.Size([10, 312, 100, 100])
-            rgb = self.engine(pts.contiguous()) # try pts.contiguous()
+            rgb = self.engine(pts.contiguous())
             dim = rgb.shape[1]
             rgb = (
                 torch.permute(rgb, (0, 2, 3, 1))
@@ -308,13 +329,21 @@ class R2LEngine():
                     torchvision.utils.make_grid(target_rgb_plot, nrow=2),
                     global_step,
                 )
-            if global_step % self.args.i_weights == 0:
+            if (global_step % self.args.i_weights == 0):# and (not self.args.prune_resume):
                 self._save_ckpt(
                     'ckpt.tar',
                     self.buffer.best_psnr,
                     self.buffer.best_psnr_step,
                     global_step
                 )
+            elif (global_step % self.args.i_weights == 0):# and (self.args.prune_resume):
+                self._save_ckpt(
+                    'ckpt-pruned.tar',
+                    self.buffer.best_psnr,
+                    self.buffer.best_psnr_step,
+                    global_step
+                )
+
         return (
                     self.buffer.loss,
                     self.buffer.psnr,

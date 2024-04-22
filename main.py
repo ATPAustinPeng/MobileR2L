@@ -52,6 +52,7 @@ from model import R2LEngine
 @click.option('--batch_size', type=int)
 @click.option('--num_epochs', type=int, default=500000)
 @click.option('--num_iters', type=int, default=500000)
+@click.option('--num_iters_pruned', type=int)
 @click.option('--ckpt_dir', type=str)
 @click.option('--lrate', type=float, default=0.0005)
 @click.option('--lr_scale', type=float, default=1.0)
