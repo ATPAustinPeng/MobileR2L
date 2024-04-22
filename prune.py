@@ -57,7 +57,6 @@ import json
 @click.option('--finetune', is_flag=True)
 @click.option('--amp', is_flag=True, default=False)
 @click.option('--resume', is_flag=True, default=False)
-@click.option('--prune_resume', is_flag=True, default=False)
 @click.option('--perturb', is_flag=True, default=True)
 @click.option('--num_workers', type=int)
 @click.option('--batch_size', type=int)
@@ -136,20 +135,6 @@ def main(**kwargs):
 
     # load pretrained model (passed through args)
     engine = R2LEngine(dataset_info, logger, args)
-    model = engine.engine
-
-    # get/save preprune stats (ex. arch, macs, params)
-    print(model)
-    input_size = (312, 100, 100) # (channels/positional_embedding, height, width)
-    macs, params = get_model_macs_params(model, input_size)
-
-    num_parameters = sum([param.nelement() for param in model.parameters()])
-    savepath = os.path.join(os.path.dirname(args.ckpt_dir), "prune.txt")
-    if is_main_process():
-        with open(savepath, "w") as fp:
-            fp.write(f"Preprune MACs/Params w/ ptflops: {macs}  | {params}\n")
-            fp.write(f"Preprune # Parameters: {num_parameters}\n")
-            fp.write(f"Preprune Test PSNR: {engine.buffer['best_psnr']}\n")
 
     if args.export_onnx:
         engine.export_onnx()
@@ -157,35 +142,42 @@ def main(**kwargs):
 
     ############################## PREPRUNE ##############################
     # perform test and video rendering; export onnx for coremltools
-    # if args.run_render:
-    #     logger.info('Starting rendering.\n')
-    #     # render testset
-    #     engine.render(
-    #         c2ws=test_poses,
-    #         gt_imgs=test_images,
-    #         global_step=0,
-    #         save_rendering=True
-    #     )
-    #     # render videos
-    #     if video_poses is not None:
-    #         engine.render(
-    #             c2ws=video_poses,
-    #             gt_imgs=None,
-    #             global_step=0,
-    #             save_video=True
-    #         )
-        # engine.export_onnx(extra_path="-preprune")
-    
-    # https://github.com/Eric-mingjie/rethinking-network-pruning/blob/master/cifar/network-slimming/resprune.py
-    logger.info("Begin pruning.\n")
+    if args.run_render:
+        logger.info('Starting rendering. \n')
+        # render testset
+        engine.render(
+            c2ws=test_poses,
+            gt_imgs=test_images,
+            global_step=0,
+            save_rendering=True
+        )
+        # render videos
+        if video_poses is not None:
+            engine.render(
+                c2ws=video_poses,
+                gt_imgs=None,
+                global_step=0,
+                save_video=True
+            )
 
-    # count # of BN weights
+        engine.export_onnx(extra_path="-preprune")
+        
+    
+    # PERFORM PRUNING
+    # https://github.com/Eric-mingjie/rethinking-network-pruning/blob/master/cifar/network-slimming/resprune.py
+    logger.info("Begin pruning. \n")
+    model = engine.engine
+
+    print(model) # print model architecture
+    input_size = (312, 100, 100)  # (channels/positional_embedding, height, width)
+    macs, params = get_model_macs_params(model, input_size)
+
     total = 0
     for m in model.modules():
         if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.SyncBatchNorm):
             total += m.weight.data.shape[0]
 
-    # collect BN weights (aka scale factor)
+    # collect BN weights/scale factor
     bn = torch.zeros(total)
     index = 0
     for m in model.modules():
@@ -194,12 +186,12 @@ def main(**kwargs):
             bn[index:(index+size)] = m.weight.data.abs().clone()
             index += size
 
-    # sort scale factors
+    # sort BN scale factors
     y, i = torch.sort(bn)
     thre_index = int(total * args.prune_percentage / 100)
     thre = y[thre_index]
 
-    # prune out lowest scale factors using a mask
+    # prune channels based on BN scale factors
     pruned = 0
     cfg = []
     cfg_mask = []
@@ -213,19 +205,37 @@ def main(**kwargs):
             cfg.append(int(torch.sum(mask)))
             cfg_mask.append(mask.clone())
             logger.info(f"layer index: {k} \t total channel: {mask.shape[0]} \t remaining channel: {int(torch.sum(mask))}")
+            # print('layer index: {:d} \t total channel: {:d} \t remaining channel: {:d}'.
+            #     format(k, mask.shape[0], int(torch.sum(mask))))
         elif isinstance(m, nn.MaxPool2d):
             cfg.append('M')
 
     pruned_ratio = pruned/total
     logger.info(f"Pruned ratio: {pruned_ratio}")
     logger.info(f"CFG: {cfg}")
+    # print(pruned_ratio)
+    # print(cfg)
+
 
     # initialize new model
     newengine = R2LEngine(dataset_info, logger, args, cfg=cfg)
     newmodel = newengine.engine
 
     print(newmodel) # should match the preprune arch (cuz pruning hasn't happened yet)
+    newmacs, newparams = get_model_macs_params(model, input_size)
 
+
+    num_parameters = sum([param.nelement() for param in model.parameters()])
+    new_num_parameters = sum([param.nelement() for param in newmodel.parameters()])
+    savepath = os.path.join(os.path.dirname(args.ckpt_dir), "prune.txt")
+    with open(savepath, "w") as fp:
+        fp.write(f"Preprune MACs/Params w/ ptflops: {macs}  | {params}")
+        fp.write(f"Preprune # Parameters: {num_parameters}\n")
+        fp.write(f"Preprune Test PSNR: {engine.buffer['best_psnr']}\n")
+
+        fp.write(f"Postprune Configuration:\n{cfg}\n")
+        fp.write(f"Postprune MACs/Params w/ ptflops: {newmacs} | {newparams}")
+        fp.write(f"Postprune # Parameters: {new_num_parameters}\n")
 
     old_modules = list(model.modules())
     new_modules = list(newmodel.modules())
@@ -303,50 +313,44 @@ def main(**kwargs):
             m1.weight.data = m0.weight.data[:, idx0].clone()
             m1.bias.data = m0.bias.data.clone()
 
-    del engine
-    del model
-
     logger.info("Successfully pruned model.")
 
     # model should be different now
     print(newmodel)
+
+    del engine
     engine = newengine
 
-    newmacs, newparams = get_model_macs_params(newmodel, input_size)
-    new_num_parameters = sum([param.nelement() for param in newmodel.parameters()])
-    
-    if is_main_process():
-        with open(savepath, "a") as fp:
-            fp.write(f"\nPostprune Configuration:\n{cfg}\n")
-            fp.write(f"Postprune MACs/Params w/ ptflops: {newmacs} | {newparams}\n")
-            fp.write(f"Postprune # Parameters: {new_num_parameters}\n")
-            fp.write(f"Postprune Test PSNR: {engine.buffer['best_psnr']}\n")
-
-        # save cfg
-        path = os.path.join(f'{engine.buffer.exp_dir}/weights', 'cfg.json')
-        with open(path, "w") as file:
-            json.dump(cfg, file)
-
-    # # perform testing postprune
-    # if args.run_render and is_main_process():
-    #     logger.info('Starting rendering. \n')
-    #     # render testset
-    #     engine.render(
-    #         c2ws=test_poses,
-    #         gt_imgs=test_images,
-    #         global_step=0,
-    #         save_rendering=True
-    #     )
-    #     # render videos
-    #     if video_poses is not None:
-    #         engine.render(
-    #             c2ws=video_poses,
-    #             gt_imgs=None,
-    #             global_step=0,
-    #             save_video=True
-    #         )
+    # perform testing postprune and save onnx
+    if args.run_render:
+        logger.info('Starting rendering. \n')
+        # render testset
+        engine.render(
+            c2ws=test_poses,
+            gt_imgs=test_images,
+            global_step=0,
+            save_rendering=True
+        )
+        # render videos
+        if video_poses is not None:
+            engine.render(
+                c2ws=video_poses,
+                gt_imgs=None,
+                global_step=0,
+                save_video=True
+            )
+        # dist.barrier()
         # engine.export_onnx(extra_path="-postprune")
-    
+
+    with open(savepath, "a") as fp:
+        fp.write(f"Postprune Test PSNR: {engine.buffer['best_psnr']}\n")
+
+    # get model stats
+    # 312 is achieved from 3 * args.n_sample_per_ray * embedder.embed_dim (3 * 13 * 8)
+    input_size = (312, 100, 100)  # (channels/positional_embedding, height, width)
+    macs, params = get_model_macs_params(newmodel, input_size)
+
+    # TODO save pruned model
     # train pruned model
     if args.run_train:
         pseudo_dataloader, num_pseudo = get_pseduo_dataloader(
@@ -361,7 +365,7 @@ def main(**kwargs):
             range(
                 set_epoch_num(
                     global_step,
-                    args.num_iters,
+                    global_step + args.num_iters,# args.num_iters, #modify to train for a set number of iterations
                     args.batch_size,
                     num_pseudo,
                     world_size
@@ -382,7 +386,7 @@ def main(**kwargs):
                         target_rgb=target_rgb.to(device),
                         global_step=global_step
                     )
-                    if (global_step % args.i_video == 0) and video_poses is not None: # or global_step == 1
+                    if global_step % args.i_video == 0 and video_poses is not None:
                         engine.render(
                             c2ws=video_poses,
                             gt_imgs=None,
@@ -390,31 +394,25 @@ def main(**kwargs):
                             save_video=True
                         )
                     
-                    if (global_step % args.i_testset == 0): # or global_step == 1
+                    if global_step % args.i_testset == 0:
                         engine.render(
                             c2ws=test_poses,
                             gt_imgs=test_images,
                             global_step=global_step,
-                            save_rendering=(global_step % args.i_save_rendering == 0)# or global_step == 1)
+                            save_rendering=(global_step % args.i_save_rendering == 0)
                         )  
                     pbar.set_postfix(iter=global_step, loss=loss.item(), psnr=psnr, best_psnr=best_psnr) 
                     dist.barrier()
 
         engine.export_onnx()
 
-# # get model stats
-# # 312 is achieved from 3 * args.n_sample_per_ray * embedder.embed_dim (3 * 13 * 8)
-# input_size = (312, 100, 100)  # (channels/positional_embedding, height, width)
-# get_model_macs_params(model, input_size)
-# get_model_output_shape(model, input_size)
-
 def get_model_macs_params(model, input_size):
     from ptflops import get_model_complexity_info
 
     macs, params = get_model_complexity_info(model, input_size)#, as_strings=True)#, print_per_layer_stat=True)
 
-    # print(f"Number of MACs: {macs}")
-    # print(f"Number of parameters: {params}")
+    print(f"Number of MACs: {macs}")
+    print(f"Number of parameters: {params}")
 
     return macs, params
 

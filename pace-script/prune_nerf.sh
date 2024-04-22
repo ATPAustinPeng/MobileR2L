@@ -49,9 +49,9 @@ OMP_NUM_THREADS=$omp_num_threads python3 -m torch.distributed.launch --nproc_per
     --output_height 800 \
     --output_width 800 \
     --scene $scene \
-    --i_weights 100 \
-    --i_testset 100 \
-    --i_video 100 \
+    --i_weights 1000 \
+    --i_testset 70000 \
+    --i_video 70000 \
     --amp \
     --lrate 0.0005 \
     --prune_percentage $prune_percentage \

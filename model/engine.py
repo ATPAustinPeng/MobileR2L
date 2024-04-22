@@ -125,7 +125,7 @@ class R2LEngine():
                     map_location={'cuda:%d' % 0: 'cuda:%d' % self.dataset_info.device} 
                 )
                 self._load_ckpt(ckpt)
-                self.logger.info(f'[Rank {self.dataset_info.device}]: Loaded checkpoint {self.args.ckpt_dir}')
+                self.logger.info(f'[Rank {self.dataset_info.device}]: Loadded checkpoint {self.args.ckpt_dir}')
                 
                 if self.args.resume:
                     self._register('start', ckpt.get('global_step', 0))
@@ -135,24 +135,6 @@ class R2LEngine():
                     if self.args.amp:
                         self.scaler.load_state_dict(ckpt.get('scaler', None))
                     self.logger.info(f'[Rank {self.dataset_info.device}]:Resume optimizer successfully.')
-        elif cfg is not None and self.args.prune_resume:
-            if self.args.ckpt_dir:
-                ckpt = torch.load(
-                    self.args.ckpt_dir,
-                    map_location={'cuda:%d' % 0: 'cuda:%d' % self.dataset_info.device} 
-                )
-                self._load_ckpt(ckpt)
-                self.logger.info(f'[Rank {self.dataset_info.device}]: Loaded pruned model checkpoint {self.args.ckpt_dir}')
-
-
-                self._register('start', ckpt.get('global_step', 0))
-                self._register('best_psnr', ckpt.get('best_psnr', 0))
-                self._register('best_psnr_step', ckpt.get('best_psnr_step', 0))
-                self.optimizer.load_state_dict(ckpt.get('optimizer_state_dict', None))
-                if self.args.amp:
-                    self.scaler.load_state_dict(ckpt.get('scaler', None))
-                self.logger.info(f'[Rank {self.dataset_info.device}]:Resume pruned model optimizer successfully.')
-
                 
         # Save intrinsics for lens
         self._save_instrinsics()
@@ -329,21 +311,13 @@ class R2LEngine():
                     torchvision.utils.make_grid(target_rgb_plot, nrow=2),
                     global_step,
                 )
-            if (global_step % self.args.i_weights == 0):# and (not self.args.prune_resume):
+            if global_step % self.args.i_weights == 0:
                 self._save_ckpt(
                     'ckpt.tar',
                     self.buffer.best_psnr,
                     self.buffer.best_psnr_step,
                     global_step
                 )
-            elif (global_step % self.args.i_weights == 0):# and (self.args.prune_resume):
-                self._save_ckpt(
-                    'ckpt-pruned.tar',
-                    self.buffer.best_psnr,
-                    self.buffer.best_psnr_step,
-                    global_step
-                )
-
         return (
                     self.buffer.loss,
                     self.buffer.psnr,
@@ -639,6 +613,3 @@ class R2LEngine():
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = new_lrate
         self._register('lr', new_lrate)
-        
-
-
