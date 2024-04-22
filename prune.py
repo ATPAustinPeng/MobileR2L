@@ -92,7 +92,7 @@ import json
 @click.option("--i_print", type=int, default=10000, help='frequency of console printout and metric loggin')
 @click.option("--train_image_log_step", type=int, default=5000, help='frequency of tensorboard image logging')
 @click.option("--i_weights", type=int, default=10000, help='frequency of weight ckpt saving')
-@click.option("--i_save_rendering", type=int, default=10000, help='frequency of weight ckpt saving')
+@click.option("--i_save_rendering", type=int, default=10000, help='frequency of gt vs model rendered img saving')
 @click.option("--i_testset", type=int, default=10000, help='frequency of testset saving')
 @click.option("--i_video", type=int, default=100000, help='frequency of render_poses video saving')
 def main(**kwargs):
@@ -135,6 +135,12 @@ def main(**kwargs):
 
     # load pretrained model (passed through args)
     engine = R2LEngine(dataset_info, logger, args)
+    model = engine.engine
+
+    # get/save preprune stats
+    print(model)
+    input_size = (312, 100, 100)  # (channels/positional_embedding, height, width)
+    macs, params = get_model_macs_params(model, input_size)
 
     if args.export_onnx:
         engine.export_onnx()
@@ -162,16 +168,10 @@ def main(**kwargs):
 
         engine.export_onnx(extra_path="-preprune")
         
-    
-    # PERFORM PRUNING
     # https://github.com/Eric-mingjie/rethinking-network-pruning/blob/master/cifar/network-slimming/resprune.py
-    logger.info("Begin pruning. \n")
-    model = engine.engine
+    logger.info("Begin pruning.\n")
 
-    print(model) # print model architecture
-    input_size = (312, 100, 100)  # (channels/positional_embedding, height, width)
-    macs, params = get_model_macs_params(model, input_size)
-
+    # count # of BN weights
     total = 0
     for m in model.modules():
         if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.SyncBatchNorm):
@@ -213,9 +213,6 @@ def main(**kwargs):
     pruned_ratio = pruned/total
     logger.info(f"Pruned ratio: {pruned_ratio}")
     logger.info(f"CFG: {cfg}")
-    # print(pruned_ratio)
-    # print(cfg)
-
 
     # initialize new model
     newengine = R2LEngine(dataset_info, logger, args, cfg=cfg)

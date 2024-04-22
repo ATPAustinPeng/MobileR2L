@@ -430,7 +430,22 @@ class R2LEngine():
                             "train_psnr": self.buffer.psnr
                         }
                         json.dump(psnr, fn, indent=2)
-                        
+
+                    # save ssim and lpips test score when psnr is the best - psnr is main metric
+                    with open(os.path.join(self.buffer.weight_dir, "ssim.json"), 'a') as fn:
+                        ssim = {
+                            "test_ssim": self.buffer.test_ssim,
+                            "step": self.buffer.best_psnr_step
+                        }
+                        json.dump(ssim, fn, indent=2)
+
+                    with open(os.path.join(self.buffer.weight_dir, "lpips.json"), 'a') as fn:
+                        lpips = {
+                            "test_lpips": self.buffer.test_lpips,
+                            "step": self.buffer.best_psnr_step
+                        }
+                        json.dump(lpips, fn, indent=2)
+
             self.logger.info(
                     f"[TEST] Iter {global_step} TestPSNR {self.buffer.test_psnr:.4f} \
                     BestPSNRv2 {self.buffer.best_psnr:.4f} (Iter {self.buffer.best_psnr_step}) \
@@ -439,7 +454,6 @@ class R2LEngine():
             )
         engine.train()
         torch.cuda.empty_cache()
-
 
     def _get_metrics(self, rgbs, gt_imgs, psnrs, ssims):
         # https://github.com/richzhang/PerceptualSimilarity
