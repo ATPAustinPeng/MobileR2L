@@ -627,3 +627,44 @@ class R2LEngine():
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = new_lrate
         self._register('lr', new_lrate)
+
+    @main_process
+    def save_prune_txt(self, mode=None, cfg=None, filename="prune.txt"):
+        if mode is None:
+            mode = ""
+
+        exp_weight_dir = self.buffer.weight_dir
+
+        # 312 is achieved from 3 * args.n_sample_per_ray * embedder.embed_dim (3 * 13 * 8)
+        input_size = (312, 100, 100) # (channels/positional_embedding, height, width)
+        macs, params = self.get_model_macs_params(input_size)
+
+        num_parameters = sum([param.nelement() for param in self.engine.parameters()])
+
+        with open(os.path.join(exp_weight_dir, filename), "a") as f:
+            if cfg is not None:
+                f.write(f"{mode} CFG:\n{cfg}\n\n")
+
+            f.write(f"{mode} # MACs w/ ptflops: {macs}\n")
+            f.write(f"{mode} # Params w/ ptflops: {params}\n")
+            f.write(f"{mode} # Params (manual sum): {num_parameters}\n")
+            f.write(f"{mode} Test PSNR: {self.buffer.best_psnr}\n")
+            f.write(f"{mode} Test SSIM: {self.buffer.get('test_ssim', None)}\n")
+            f.write(f"{mode} Test LPIPS: {self.buffer.get('test_lpips', None)}\n")
+
+    @main_process
+    def save_arch(self, filename):
+        exp_weight_dir = self.buffer.weight_dir
+        with open(os.path.join(exp_weight_dir, filename), "w") as f:
+            f.write(str(self.engine))
+
+    @main_process
+    def get_model_macs_params(self, input_size):
+        from ptflops import get_model_complexity_info
+
+        macs, params = get_model_complexity_info(self.engine, input_size)#, as_strings=True)#, print_per_layer_stat=True)
+
+        # print(f"Number of MACs: {macs}")
+        # print(f"Number of parameters: {params}")
+
+        return macs, params

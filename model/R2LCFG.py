@@ -137,7 +137,10 @@ class R2LCFG(nn.Module):
             cfg = [[256, 256] * n_block]
             cfg += [[kernels[n], kernels[n]] for n in range(n_up_block) for _ in range(n_conv)] # Note: must iterate from outer block -> inner block (or shapes don't match)
             cfg = [item for sub_list in cfg for item in sub_list]
-            # cfg = [item for subsublist in cfg for sublist in subsublist for item in sublist]
+        elif cfg is not None:
+            tmp = [[kernels[n], kernels[n]] for n in range(n_up_block) for _ in range(n_conv)]
+            tmp = [item for sub_list in tmp for item in sub_list]
+            cfg += tmp
         cfg_count = 0
 
         body = []

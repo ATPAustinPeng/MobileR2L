@@ -196,12 +196,12 @@ def init_distributed_mode(args):
     print(
         '| distributed init (rank {})'.format(args.rank), flush=True
     )
-    torch.distributed.init_process_group(
+    dist.init_process_group(
         backend=args.dist_backend,
         world_size=args.world_size,
         rank=args.rank
     )
-    torch.distributed.barrier()
+    dist.barrier()
     setup_for_distributed(args.rank == 0)
 
 

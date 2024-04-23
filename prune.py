@@ -24,7 +24,8 @@ from utils import (
     set_epoch_num,
     get_rank,
     init_distributed_mode,
-    get_world_size
+    get_world_size,
+    main_process
 )
 from model import R2LEngine
 from model.R2L import R2L
@@ -137,10 +138,9 @@ def main(**kwargs):
     engine = R2LEngine(dataset_info, logger, args)
     model = engine.engine
 
-    # get/save preprune stats
-    print(model)
-    input_size = (312, 100, 100)  # (channels/positional_embedding, height, width)
-    macs, params = get_model_macs_params(model, input_size)
+    # # get/save preprune stats
+    # engine.save_arch("original_arch.txt")
+    # engine.save_prune_txt(mode="PREPRUNE")
 
     if args.export_onnx:
         engine.export_onnx()
@@ -166,21 +166,34 @@ def main(**kwargs):
                 save_video=True
             )
 
-        engine.export_onnx(extra_path="-preprune")
+        # engine.export_onnx(extra_path="-preprune")
         
     # https://github.com/Eric-mingjie/rethinking-network-pruning/blob/master/cifar/network-slimming/resprune.py
-    logger.info("Begin pruning.\n")
+    logger.info("Calculate pruning config.\n")
 
     # count # of BN weights
+    # for n, m in model.named_modules():
+    #     if 'tail' in n:
+    #         logger.info(n)
+    #         logger.info(m)
+
     total = 0
-    for m in model.modules():
+    # for m in model.modules():
+    for n, m in model.named_modules():
+        if 'tail' in n:
+            continue
+
         if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.SyncBatchNorm):
             total += m.weight.data.shape[0]
 
     # collect BN weights/scale factor
     bn = torch.zeros(total)
     index = 0
-    for m in model.modules():
+    # for m in model.modules():
+    for n, m in model.named_modules():
+        if 'tail' in n:
+            continue
+            
         if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.SyncBatchNorm):
             size = m.weight.data.shape[0]
             bn[index:(index+size)] = m.weight.data.abs().clone()
@@ -195,7 +208,11 @@ def main(**kwargs):
     pruned = 0
     cfg = []
     cfg_mask = []
-    for k, m in enumerate(model.modules()):
+    # for k, m in enumerate(model.modules()):
+    for k, (n, m) in enumerate(model.named_modules()):
+        if 'tail' in n:
+            continue
+            
         if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.SyncBatchNorm):
             weight_copy = m.weight.data.abs().clone()
             mask = weight_copy.gt(thre).float().to(device)
@@ -205,37 +222,37 @@ def main(**kwargs):
             cfg.append(int(torch.sum(mask)))
             cfg_mask.append(mask.clone())
             logger.info(f"layer index: {k} \t total channel: {mask.shape[0]} \t remaining channel: {int(torch.sum(mask))}")
-            # print('layer index: {:d} \t total channel: {:d} \t remaining channel: {:d}'.
-            #     format(k, mask.shape[0], int(torch.sum(mask))))
         elif isinstance(m, nn.MaxPool2d):
             cfg.append('M')
 
     pruned_ratio = pruned/total
     logger.info(f"Pruned ratio: {pruned_ratio}")
     logger.info(f"CFG: {cfg}")
+    
+    # ensure all devices have the CFG before initializing new model
+    dist.barrier()
 
     # initialize new model
     newengine = R2LEngine(dataset_info, logger, args, cfg=cfg)
     newmodel = newengine.engine
 
-    print(newmodel) # should match the preprune arch (cuz pruning hasn't happened yet)
-    newmacs, newparams = get_model_macs_params(model, input_size)
+    # old_modules = list(model.modules())
+    # new_modules = list(newmodel.modules())
+    old_modules = list()
+    new_modules = list()
 
+    for n, m in model.named_modules():
+        if 'tail' in n:
+            continue
+        
+        old_modules.append(m)
 
-    num_parameters = sum([param.nelement() for param in model.parameters()])
-    new_num_parameters = sum([param.nelement() for param in newmodel.parameters()])
-    savepath = os.path.join(os.path.dirname(args.ckpt_dir), "prune.txt")
-    with open(savepath, "w") as fp:
-        fp.write(f"Preprune MACs/Params w/ ptflops: {macs}  | {params}")
-        fp.write(f"Preprune # Parameters: {num_parameters}\n")
-        fp.write(f"Preprune Test PSNR: {engine.buffer['best_psnr']}\n")
+    for n, m in newmodel.named_modules():
+        if 'tail' in n:
+            continue
+        
+        new_modules.append(m)
 
-        fp.write(f"Postprune Configuration:\n{cfg}\n")
-        fp.write(f"Postprune MACs/Params w/ ptflops: {newmacs} | {newparams}")
-        fp.write(f"Postprune # Parameters: {new_num_parameters}\n")
-
-    old_modules = list(model.modules())
-    new_modules = list(newmodel.modules())
     layer_id_in_cfg = 0
     start_mask = torch.ones(3)
     end_mask = cfg_mask[layer_id_in_cfg]
@@ -312,11 +329,19 @@ def main(**kwargs):
 
     logger.info("Successfully pruned model.")
 
-    # model should be different now
-    print(newmodel)
-
     del engine
+    del model
+
     engine = newengine
+
+    # # model should be different now
+    # engine.save_arch("pruned_arch.txt")
+    # engine.save_prune_txt(mode="POSTPRUNE", cfg=cfg)
+
+    # save cfg
+    # if is_main_process():
+        # with open(os.path.join(exp_weight_dir, 'cfg.json'), "w") as file:
+        #     json.dump(cfg, file)
 
     # perform testing postprune and save onnx
     if args.run_render:
@@ -338,14 +363,6 @@ def main(**kwargs):
             )
         # dist.barrier()
         # engine.export_onnx(extra_path="-postprune")
-
-    with open(savepath, "a") as fp:
-        fp.write(f"Postprune Test PSNR: {engine.buffer['best_psnr']}\n")
-
-    # get model stats
-    # 312 is achieved from 3 * args.n_sample_per_ray * embedder.embed_dim (3 * 13 * 8)
-    input_size = (312, 100, 100)  # (channels/positional_embedding, height, width)
-    macs, params = get_model_macs_params(newmodel, input_size)
 
     # TODO save pruned model
     # train pruned model
@@ -402,25 +419,6 @@ def main(**kwargs):
                     dist.barrier()
 
         engine.export_onnx()
-
-def get_model_macs_params(model, input_size):
-    from ptflops import get_model_complexity_info
-
-    macs, params = get_model_complexity_info(model, input_size)#, as_strings=True)#, print_per_layer_stat=True)
-
-    print(f"Number of MACs: {macs}")
-    print(f"Number of parameters: {params}")
-
-    return macs, params
-
-def get_model_output_shape(model, input_size):
-    dummy_input = torch.randn(1, *input_size)
-
-    model.eval() # set model to eval mode
-    with torch.no_grad(): # save memory
-        output = model(dummy_input)
-    
-    print(output.shape)
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)

@@ -33,8 +33,8 @@ omp_num_threads=$((ncpu_cores / nGPU))
 # [E socket.cpp:500] [c10d] The server socket has failed to listen on any local network address.
 
 # Note: for prune.py ONLY, num_iters = number of additional iters to train on top of checkpoint
-
-OMP_NUM_THREADS=$omp_num_threads python3 -m torch.distributed.launch --nproc_per_node=$nGPU --use_env prune.py \
+# OMP_NUM_THREADS=$omp_num_threads python3 -m torch.distributed.launch --nproc_per_node=$nGPU --master_port=25641 --use_env prune.py \
+OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU --master_port=25641 prune.py \
     --project_name $scene \
     --dataset_type Blender \
     --pseudo_dir model/teacher/ngp_pl/Pseudo/$scene  \
