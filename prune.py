@@ -75,6 +75,8 @@ import json
 @click.option('--convert_snap_gelu', type=bool, default=True)
 # prune
 @click.option('--prune_percentage', type=int, default=30)
+@click.option('--get_pruned_info', is_flag=True, default=False, help="Get pruned model info")
+@click.option('--get_info', is_flag=True, default=False, help="Get original model info.")
 # model
 @click.option('--input_height', type=int)
 @click.option('--input_width', type=int)
@@ -141,6 +143,25 @@ def main(**kwargs):
     # # get/save preprune stats
     # engine.save_arch("original_arch.txt")
     # engine.save_prune_txt(mode="PREPRUNE")
+    if args.get_info:
+        from ptflops import get_model_complexity_info
+        input_size = (312, 100, 100)
+        macs, params = get_model_complexity_info(model, input_size)#, as_strings=True)#, print_per_layer_stat=True)
+
+        param_size = 0
+        for param in model.parameters():
+            param_size += param.nelement() * param.element_size()
+        buffer_size = 0
+        for buffer in model.buffers():
+            buffer_size += buffer.nelement() * buffer.element_size()
+
+        size_all_mb = (param_size + buffer_size) / 1024**2
+
+        print(f"Model Size: {size_all_mb} MB")
+        print(f"Number of MACs: {macs}")
+        print(f"Number of parameters: {params}")
+
+        exit()
 
     if args.export_onnx:
         engine.export_onnx()
@@ -172,13 +193,7 @@ def main(**kwargs):
     logger.info("Calculate pruning config.\n")
 
     # count # of BN weights
-    # for n, m in model.named_modules():
-    #     if 'tail' in n:
-    #         logger.info(n)
-    #         logger.info(m)
-
     total = 0
-    # for m in model.modules():
     for n, m in model.named_modules():
         if 'tail' in n:
             continue
@@ -189,7 +204,6 @@ def main(**kwargs):
     # collect BN weights/scale factor
     bn = torch.zeros(total)
     index = 0
-    # for m in model.modules():
     for n, m in model.named_modules():
         if 'tail' in n:
             continue
@@ -208,7 +222,6 @@ def main(**kwargs):
     pruned = 0
     cfg = []
     cfg_mask = []
-    # for k, m in enumerate(model.modules()):
     for k, (n, m) in enumerate(model.named_modules()):
         if 'tail' in n:
             continue
@@ -236,21 +249,16 @@ def main(**kwargs):
     newengine = R2LEngine(dataset_info, logger, args, cfg=cfg)
     newmodel = newengine.engine
 
-    # old_modules = list(model.modules())
-    # new_modules = list(newmodel.modules())
     old_modules = list()
     new_modules = list()
-
     for n, m in model.named_modules():
         if 'tail' in n:
             continue
-        
         old_modules.append(m)
 
     for n, m in newmodel.named_modules():
         if 'tail' in n:
             continue
-        
         new_modules.append(m)
 
     layer_id_in_cfg = 0
@@ -337,6 +345,25 @@ def main(**kwargs):
     # # model should be different now
     # engine.save_arch("pruned_arch.txt")
     # engine.save_prune_txt(mode="POSTPRUNE", cfg=cfg)
+    if args.get_pruned_info:
+        from ptflops import get_model_complexity_info
+        input_size = (312, 100, 100)
+        macs, params = get_model_complexity_info(newmodel, input_size)#, as_strings=True)#, print_per_layer_stat=True)
+
+        param_size = 0
+        for param in newmodel.parameters():
+            param_size += param.nelement() * param.element_size()
+        buffer_size = 0
+        for buffer in newmodel.buffers():
+            buffer_size += buffer.nelement() * buffer.element_size()
+
+        size_all_mb = (param_size + buffer_size) / 1024**2
+
+        print(f"Model Size: {size_all_mb} MB")
+        print(f"Number of MACs: {macs}")
+        print(f"Number of parameters: {params}")
+
+        exit()
 
     # save cfg
     # if is_main_process():

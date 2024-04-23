@@ -35,7 +35,7 @@ omp_num_threads=$((ncpu_cores / nGPU))
 # Note: for prune.py ONLY, num_iters = number of additional iters to train on top of checkpoint
 # OMP_NUM_THREADS=$omp_num_threads python3 -m torch.distributed.launch --nproc_per_node=$nGPU --master_port=25641 --use_env prune.py \
 OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU --master_port=25641 prune.py \
-    --project_name $project_name \
+    --project_name $scene \
     --dataset_type Blender \
     --pseudo_dir model/teacher/ngp_pl/Pseudo/$scene  \
     --root_dir dataset/nerf_synthetic \
@@ -49,12 +49,13 @@ OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU --master_port=2
     --output_height 800 \
     --output_width 800 \
     --scene $scene \
-    --i_weights 1000 \
-    --i_testset 70000 \
-    --i_save_rendering 10000 \
-    --i_video 70000 \
+    --i_weights 25 \
+    --i_testset 50 \
+    --i_save_rendering 50 \
+    --i_video 100 \
     --amp \
     --lrate 0.0005 \
     --prune_percentage $prune_percentage \
     --ckpt_dir $ckpt_dir \
-    --resume
+    --resume \
+    --get_pruned_info
