@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=prune_nerf.sh
+#SBATCH --job-name=export_pruned_model.sh
 #SBATCH --output=%x.%j.out
 #SBATCH --error=%x.%j.err
 #SBATCH -t 0-04:00:00
@@ -17,15 +17,12 @@ nGPU=$1
 scene=$2
 project_name="${scene}-pruned"
 ckpt_dir=$3
-prune_percentage_str=$4
-prune_percentage=$((prune_percentage_str))
 
 ncpu_cores=$(nproc --all)
 omp_num_threads=$((ncpu_cores / nGPU))
 
 # BOTH run_render and run_train flags need to be True
 # run_train puts model in DDP (which must happen as weights were saved as DDP)
-# python3 prune.py \
 
 # occassionally add --master_port=25641 if you are getting socket issues
 # [W socket.cpp:464] [c10d] The server socket has failed to bind to [::]:25641 (errno: 98 - Address already in use).
@@ -34,12 +31,11 @@ omp_num_threads=$((ncpu_cores / nGPU))
 
 # Note: for prune.py ONLY, num_iters = number of additional iters to train on top of checkpoint
 # OMP_NUM_THREADS=$omp_num_threads python3 -m torch.distributed.launch --nproc_per_node=$nGPU --master_port=25641 --use_env prune.py \
-OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU prune.py \
+OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU export_pruned_model.py \
     --project_name $project_name \
     --dataset_type Blender \
     --pseudo_dir model/teacher/ngp_pl/Pseudo/$scene  \
     --root_dir dataset/nerf_synthetic \
-    --run_train \
     --run_render \
     --num_workers 12 \
     --batch_size 10 \
@@ -55,6 +51,5 @@ OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU prune.py \
     --i_video 60000 \
     --amp \
     --lrate 0.0005 \
-    --prune_percentage $prune_percentage \
     --ckpt_dir $ckpt_dir \
     --resume

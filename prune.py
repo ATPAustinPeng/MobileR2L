@@ -169,23 +169,23 @@ def main(**kwargs):
 
     ############################## PREPRUNE ##############################
     # perform test and video rendering; export onnx for coremltools
-    if args.run_render:
-        logger.info('Starting rendering. \n')
-        # render testset
-        engine.render(
-            c2ws=test_poses,
-            gt_imgs=test_images,
-            global_step=0,
-            save_rendering=True
-        )
-        # render videos
-        if video_poses is not None:
-            engine.render(
-                c2ws=video_poses,
-                gt_imgs=None,
-                global_step=0,
-                save_video=True
-            )
+    # if args.run_render:
+    #     logger.info('Starting rendering. \n')
+    #     # render testset
+    #     engine.render(
+    #         c2ws=test_poses,
+    #         gt_imgs=test_images,
+    #         global_step=0,
+    #         save_rendering=True
+    #     )
+    #     # render videos
+    #     if video_poses is not None:
+    #         engine.render(
+    #             c2ws=video_poses,
+    #             gt_imgs=None,
+    #             global_step=0,
+    #             save_video=True
+    #         )
 
         # engine.export_onnx(extra_path="-preprune")
         
@@ -243,6 +243,13 @@ def main(**kwargs):
     logger.info(f"CFG: {cfg}")
     
     # ensure all devices have the CFG before initializing new model
+    if is_main_process():
+        exp_weight_dir = engine.buffer.weight_dir
+        with open(os.path.join(exp_weight_dir, 'cfg.json'), 'w') as f:
+                json.dump(cfg, f)
+        
+        torch.save(cfg_mask, os.path.join(exp_weight_dir, 'cfg_mask.pth'))
+
     dist.barrier()
 
     # initialize new model
@@ -337,6 +344,28 @@ def main(**kwargs):
 
     logger.info("Successfully pruned model.")
 
+    if args.run_render:
+        logger.info('Starting rendering. \n')
+        # render testset
+        engine.render(
+            c2ws=test_poses,
+            gt_imgs=test_images,
+            global_step=0,
+            save_rendering=True
+        )
+        # render videos
+        if video_poses is not None:
+            engine.render(
+                c2ws=video_poses,
+                gt_imgs=None,
+                global_step=0,
+                save_video=True
+            )
+        # engine.export_onnx(extra_path="-postprune")
+
+    print("Saved pruned model.")
+    return
+    
     del engine
     del model
 
