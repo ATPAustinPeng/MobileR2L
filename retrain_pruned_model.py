@@ -24,7 +24,8 @@ from utils import (
     set_epoch_num,
     get_rank,
     init_distributed_mode,
-    get_world_size
+    get_world_size,
+    main_process
 )
 from model import R2LEngine
 from model.R2L import R2L
@@ -57,7 +58,6 @@ import json
 @click.option('--finetune', is_flag=True)
 @click.option('--amp', is_flag=True, default=False)
 @click.option('--resume', is_flag=True, default=False)
-@click.option('--prune_resume', is_flag=True, default=False)
 @click.option('--perturb', is_flag=True, default=True)
 @click.option('--num_workers', type=int)
 @click.option('--batch_size', type=int)
@@ -75,6 +75,8 @@ import json
 @click.option('--convert_snap_gelu', type=bool, default=True)
 # prune
 @click.option('--prune_percentage', type=int, default=30)
+@click.option('--get_pruned_info', is_flag=True, default=False, help="Get pruned model info")
+@click.option('--get_info', is_flag=True, default=False, help="Get original model info.")
 # model
 @click.option('--input_height', type=int)
 @click.option('--input_width', type=int)
@@ -93,7 +95,7 @@ import json
 @click.option("--i_print", type=int, default=10000, help='frequency of console printout and metric loggin')
 @click.option("--train_image_log_step", type=int, default=5000, help='frequency of tensorboard image logging')
 @click.option("--i_weights", type=int, default=10000, help='frequency of weight ckpt saving')
-@click.option("--i_save_rendering", type=int, default=10000, help='frequency of weight ckpt saving')
+@click.option("--i_save_rendering", type=int, default=10000, help='frequency of gt vs model rendered img saving')
 @click.option("--i_testset", type=int, default=10000, help='frequency of testset saving')
 @click.option("--i_video", type=int, default=100000, help='frequency of render_poses video saving')
 def main(**kwargs):
@@ -134,221 +136,110 @@ def main(**kwargs):
     logger = logging.getLogger(__name__)
     pprint(args)
 
-    # # load pretrained model (passed through args)
-    # engine = R2LEngine(dataset_info, logger, args)
-    # model = engine.engine
+    # get pruned cfg
+    cfg_dir = os.path.dirname(args.ckpt_dir)
+    cfg_path = os.path.join(cfg_dir, 'cfg.json')
 
-    # # get/save preprune stats (ex. arch, macs, params)
-    # print(model)
-    # input_size = (312, 100, 100) # (channels/positional_embedding, height, width)
-    # macs, params = get_model_macs_params(model, input_size)
+    with open(cfg_path, 'r') as f:
+        data = f.read()
 
-    # num_parameters = sum([param.nelement() for param in model.parameters()])
-    # savepath = os.path.join(os.path.dirname(args.ckpt_dir), "prune.txt")
-    # if is_main_process():
-    #     with open(savepath, "w") as fp:
-    #         fp.write(f"Preprune MACs/Params w/ ptflops: {macs}  | {params}\n")
-    #         fp.write(f"Preprune # Parameters: {num_parameters}\n")
-    #         fp.write(f"Preprune Test PSNR: {engine.buffer['best_psnr']}\n")
+    cfg = eval(data)
+    logger.info(cfg)
 
-    # if args.export_onnx:
-    #     engine.export_onnx()
-    #     exit(0)
+    # get cfg mask
+    cfg_mask_path = os.path.join(cfg_dir, 'cfg_mask.pth')
+    cfg_mask = torch.load(cfg_mask_path)
 
-    # ############################## PREPRUNE ##############################
-    # # perform test and video rendering; export onnx for coremltools
-    # # if args.run_render:
-    # #     logger.info('Starting rendering.\n')
-    # #     # render testset
-    # #     engine.render(
-    # #         c2ws=test_poses,
-    # #         gt_imgs=test_images,
-    # #         global_step=0,
-    # #         save_rendering=True
-    # #     )
-    # #     # render videos
-    # #     if video_poses is not None:
-    # #         engine.render(
-    # #             c2ws=video_poses,
-    # #             gt_imgs=None,
-    # #             global_step=0,
-    # #             save_video=True
-    # #         )
-    #     # engine.export_onnx(extra_path="-preprune")
-    
-    # # https://github.com/Eric-mingjie/rethinking-network-pruning/blob/master/cifar/network-slimming/resprune.py
-    # logger.info("Begin pruning.\n")
-
-    # # count # of BN weights
-    # total = 0
-    # for m in model.modules():
-    #     if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.SyncBatchNorm):
-    #         total += m.weight.data.shape[0]
-
-    # # collect BN weights (aka scale factor)
-    # bn = torch.zeros(total)
-    # index = 0
-    # for m in model.modules():
-    #     if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.SyncBatchNorm):
-    #         size = m.weight.data.shape[0]
-    #         bn[index:(index+size)] = m.weight.data.abs().clone()
-    #         index += size
-
-    # # sort scale factors
-    # y, i = torch.sort(bn)
-    # thre_index = int(total * args.prune_percentage / 100)
-    # thre = y[thre_index]
-
-    # # prune out lowest scale factors using a mask
-    # pruned = 0
-    # cfg = []
-    # cfg_mask = []
-    # for k, m in enumerate(model.modules()):
-    #     if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.SyncBatchNorm):
-    #         weight_copy = m.weight.data.abs().clone()
-    #         mask = weight_copy.gt(thre).float().to(device)
-    #         pruned = pruned + mask.shape[0] - torch.sum(mask)
-    #         m.weight.data.mul_(mask)
-    #         m.bias.data.mul_(mask)
-    #         cfg.append(int(torch.sum(mask)))
-    #         cfg_mask.append(mask.clone())
-    #         logger.info(f"layer index: {k} \t total channel: {mask.shape[0]} \t remaining channel: {int(torch.sum(mask))}")
-    #     elif isinstance(m, nn.MaxPool2d):
-    #         cfg.append('M')
-
-    # pruned_ratio = pruned/total
-    # logger.info(f"Pruned ratio: {pruned_ratio}")
-    # logger.info(f"CFG: {cfg}")
-
-    # # initialize new model
-    # newengine = R2LEngine(dataset_info, logger, args, cfg=cfg)
-    # newmodel = newengine.engine
-
-    # print(newmodel) # should match the preprune arch (cuz pruning hasn't happened yet)
-
-
-    # old_modules = list(model.modules())
-    # new_modules = list(newmodel.modules())
-    # layer_id_in_cfg = 0
-    # start_mask = torch.ones(3)
-    # end_mask = cfg_mask[layer_id_in_cfg]
-    # conv_count = 0
-
-    # for layer_id in range(len(old_modules)):
-    #     m0 = old_modules[layer_id]
-    #     m1 = new_modules[layer_id]
-    #     if isinstance(m0, nn.BatchNorm2d) or isinstance(m0, nn.SyncBatchNorm):
-    #         idx1 = np.squeeze(np.argwhere(np.asarray(end_mask.cpu().numpy())))
-    #         if idx1.size == 1:
-    #             idx1 = np.resize(idx1,(1,))
-
-    #         if isinstance(old_modules[layer_id + 1], channel_selection):
-    #             # If the next layer is the channel selection layer, then the current batchnorm 2d layer won't be pruned.
-    #             m1.weight.data = m0.weight.data.clone()
-    #             m1.bias.data = m0.bias.data.clone()
-    #             m1.running_mean = m0.running_mean.clone()
-    #             m1.running_var = m0.running_var.clone()
-
-    #             # We need to set the channel selection layer.
-    #             m2 = new_modules[layer_id + 1]
-    #             m2.indexes.data.zero_()
-    #             m2.indexes.data[idx1.tolist()] = 1.0
-
-    #             layer_id_in_cfg += 1
-    #             start_mask = end_mask.clone()
-    #             if layer_id_in_cfg < len(cfg_mask):
-    #                 end_mask = cfg_mask[layer_id_in_cfg]
-    #         else:
-    #             m1.weight.data = m0.weight.data[idx1.tolist()].clone()
-    #             m1.bias.data = m0.bias.data[idx1.tolist()].clone()
-    #             m1.running_mean = m0.running_mean[idx1.tolist()].clone()
-    #             m1.running_var = m0.running_var[idx1.tolist()].clone()
-    #             layer_id_in_cfg += 1
-    #             start_mask = end_mask.clone()
-    #             if layer_id_in_cfg < len(cfg_mask):  # do not change in Final FC
-    #                 end_mask = cfg_mask[layer_id_in_cfg]
-    #     elif isinstance(m0, nn.Conv2d):
-    #         if conv_count == 0:
-    #             m1.weight.data = m0.weight.data.clone()
-    #             conv_count += 1
-    #             continue
-    #         if isinstance(old_modules[layer_id-1], channel_selection) or isinstance(old_modules[layer_id-1], nn.BatchNorm2d) or isinstance(old_modules[layer_id-1], nn.SyncBatchNorm):
-    #             # This convers the convolutions in the residual block.
-    #             # The convolutions are either after the channel selection layer or after the batch normalization layer.
-    #             conv_count += 1
-    #             idx0 = np.squeeze(np.argwhere(np.asarray(start_mask.cpu().numpy())))
-    #             idx1 = np.squeeze(np.argwhere(np.asarray(end_mask.cpu().numpy())))
-    #             print('In shape: {:d}, Out shape {:d}.'.format(idx0.size, idx1.size))
-    #             if idx0.size == 1:
-    #                 idx0 = np.resize(idx0, (1,))
-    #             if idx1.size == 1:
-    #                 idx1 = np.resize(idx1, (1,))
-    #             w1 = m0.weight.data[:, idx0.tolist(), :, :].clone()
-
-    #             # IMPORTANT: If the current convolution is not the last convolution in the residual block, then we can change the 
-    #             # number of output channels. Currently we use `conv_count` to detect whether it is such convolution.
-    #             if conv_count % 2 != 1:
-    #                 w1 = w1[idx1.tolist(), :, :, :].clone()
-    #             m1.weight.data = w1.clone()
-    #             continue
-
-    #         # We need to consider the case where there are downsampling convolutions. 
-    #         # For these convolutions, we just copy the weights.
-    #         m1.weight.data = m0.weight.data.clone()
-    #     elif isinstance(m0, nn.Linear):
-    #         idx0 = np.squeeze(np.argwhere(np.asarray(start_mask.cpu().numpy())))
-    #         if idx0.size == 1:
-    #             idx0 = np.resize(idx0, (1,))
-
-    #         m1.weight.data = m0.weight.data[:, idx0].clone()
-    #         m1.bias.data = m0.bias.data.clone()
-
-    # del engine
-    # del model
-
-    # logger.info("Successfully pruned model.")
-
-    # # model should be different now
-    # print(newmodel)
-    # engine = newengine
-
-    # newmacs, newparams = get_model_macs_params(newmodel, input_size)
-    # new_num_parameters = sum([param.nelement() for param in newmodel.parameters()])
-    
-    # if is_main_process():
-    #     with open(savepath, "a") as fp:
-    #         fp.write(f"\nPostprune Configuration:\n{cfg}\n")
-    #         fp.write(f"Postprune MACs/Params w/ ptflops: {newmacs} | {newparams}\n")
-    #         fp.write(f"Postprune # Parameters: {new_num_parameters}\n")
-    #         fp.write(f"Postprune Test PSNR: {engine.buffer['best_psnr']}\n")
-
-    # # perform testing postprune
-    # if args.run_render:
-    #     logger.info('Starting rendering. \n')
-    #     # render testset
-    #     engine.render(
-    #         c2ws=test_poses,
-    #         gt_imgs=test_images,
-    #         global_step=0,
-    #         save_rendering=True
-    #     )
-    #     # render videos
-    #     if video_poses is not None:
-    #         engine.render(
-    #             c2ws=video_poses,
-    #             gt_imgs=None,
-    #             global_step=0,
-    #             save_video=True
-    #         )
-    #     # engine.export_onnx(extra_path="-postprune")
-
-    cfg_path = os.path.join(os.path.dirname(args.ckpt_dir), "cfg.json")
-    with open(cfg_path, "r") as file:
-        cfg = json.load(file)
-
+    # load pruned model (passed through args)
     engine = R2LEngine(dataset_info, logger, args, cfg=cfg)
 
-    # train pruned model
+    dist.barrier()
+
+    modules = list()
+    for n, m in engine.engine.named_modules():
+        if 'tail' in n:
+            continue
+        modules.append(m)
+
+    layer_id_in_cfg = 0
+    start_mask = torch.ones(3)
+    end_mask = cfg_mask[layer_id_in_cfg]
+    conv_count = 0
+
+    for layer_id in range(len(modules)):
+        m0 = modules[layer_id]
+        # m1 = new_modules[layer_id]
+        if isinstance(m0, nn.BatchNorm2d) or isinstance(m0, nn.SyncBatchNorm):
+            idx1 = np.squeeze(np.argwhere(np.asarray(end_mask.cpu().numpy())))
+            if idx1.size == 1:
+                idx1 = np.resize(idx1,(1,))
+
+            if isinstance(modules[layer_id + 1], channel_selection):
+                # If the next layer is the channel selection layer, then the current batchnorm 2d layer won't be pruned.
+                # m1.weight.data = m0.weight.data.clone()
+                # m1.bias.data = m0.bias.data.clone()
+                # m1.running_mean = m0.running_mean.clone()
+                # m1.running_var = m0.running_var.clone()
+
+                # We need to set the channel selection layer.
+                m1 = modules[layer_id + 1]
+                m1.indexes.data.zero_()
+                m1.indexes.data[idx1.tolist()] = 1.0
+
+                layer_id_in_cfg += 1
+                start_mask = end_mask.clone()
+                if layer_id_in_cfg < len(cfg_mask):
+                    end_mask = cfg_mask[layer_id_in_cfg]
+            else:
+            #     m1.weight.data = m0.weight.data[idx1.tolist()].clone()
+            #     m1.bias.data = m0.bias.data[idx1.tolist()].clone()
+            #     m1.running_mean = m0.running_mean[idx1.tolist()].clone()
+            #     m1.running_var = m0.running_var[idx1.tolist()].clone()
+                layer_id_in_cfg += 1
+                start_mask = end_mask.clone()
+                if layer_id_in_cfg < len(cfg_mask):  # do not change in Final FC
+                    end_mask = cfg_mask[layer_id_in_cfg]
+        # elif isinstance(m0, nn.Conv2d):
+        #     if conv_count == 0:
+        #         m1.weight.data = m0.weight.data.clone()
+        #         conv_count += 1
+        #         continue
+        #     if isinstance(old_modules[layer_id-1], channel_selection) or isinstance(old_modules[layer_id-1], nn.BatchNorm2d) or isinstance(old_modules[layer_id-1], nn.SyncBatchNorm):
+        #         # This convers the convolutions in the residual block.
+        #         # The convolutions are either after the channel selection layer or after the batch normalization layer.
+        #         conv_count += 1
+        #         idx0 = np.squeeze(np.argwhere(np.asarray(start_mask.cpu().numpy())))
+        #         idx1 = np.squeeze(np.argwhere(np.asarray(end_mask.cpu().numpy())))
+        #         print('In shape: {:d}, Out shape {:d}.'.format(idx0.size, idx1.size))
+        #         if idx0.size == 1:
+        #             idx0 = np.resize(idx0, (1,))
+        #         if idx1.size == 1:
+        #             idx1 = np.resize(idx1, (1,))
+        #         w1 = m0.weight.data[:, idx0.tolist(), :, :].clone()
+
+        #         # IMPORTANT: If the current convolution is not the last convolution in the residual block, then we can change the 
+        #         # number of output channels. Currently we use `conv_count` to detect whether it is such convolution.
+        #         if conv_count % 2 != 1:
+        #             w1 = w1[idx1.tolist(), :, :, :].clone()
+        #         m1.weight.data = w1.clone()
+        #         continue
+
+        #     # We need to consider the case where there are downsampling convolutions. 
+        #     # For these convolutions, we just copy the weights.
+        #     m1.weight.data = m0.weight.data.clone()
+        # elif isinstance(m0, nn.Linear):
+        #     idx0 = np.squeeze(np.argwhere(np.asarray(start_mask.cpu().numpy())))
+        #     if idx0.size == 1:
+        #         idx0 = np.resize(idx0, (1,))
+
+        #     m1.weight.data = m0.weight.data[:, idx0].clone()
+        #     m1.bias.data = m0.bias.data.clone()
+
+    logger.info("Successfully pruned model.")
+
+    print(engine.engine)
+
+    # retrain pruned model
     if args.run_train:
         pseudo_dataloader, num_pseudo = get_pseduo_dataloader(
             args.pseudo_dir,
@@ -362,7 +253,7 @@ def main(**kwargs):
             range(
                 set_epoch_num(
                     global_step,
-                    args.num_iters,
+                    global_step + args.num_iters,# args.num_iters, #modify to train for a set number of iterations
                     args.batch_size,
                     num_pseudo,
                     world_size
@@ -381,9 +272,9 @@ def main(**kwargs):
                         rays_o=rays_o.to(device),
                         rays_d=rays_d.to(device),
                         target_rgb=target_rgb.to(device),
-                        global_step=global_step,
+                        global_step=global_step
                     )
-                    if (global_step % args.i_video == 0 or global_step == 1) and video_poses is not None:
+                    if global_step % args.i_video == 0 and video_poses is not None:
                         engine.render(
                             c2ws=video_poses,
                             gt_imgs=None,
@@ -391,42 +282,17 @@ def main(**kwargs):
                             save_video=True
                         )
                     
-                    if (global_step % args.i_testset == 0 or global_step == 1):
+                    if global_step % args.i_testset == 0:
                         engine.render(
                             c2ws=test_poses,
                             gt_imgs=test_images,
                             global_step=global_step,
-                            save_rendering=(global_step % args.i_save_rendering == 0 or global_step == 1)
+                            save_rendering=(global_step % args.i_save_rendering == 0)
                         )  
                     pbar.set_postfix(iter=global_step, loss=loss.item(), psnr=psnr, best_psnr=best_psnr) 
                     dist.barrier()
 
         engine.export_onnx()
-
-# # get model stats
-# # 312 is achieved from 3 * args.n_sample_per_ray * embedder.embed_dim (3 * 13 * 8)
-# input_size = (312, 100, 100)  # (channels/positional_embedding, height, width)
-# get_model_macs_params(model, input_size)
-# get_model_output_shape(model, input_size)
-
-def get_model_macs_params(model, input_size):
-    from ptflops import get_model_complexity_info
-
-    macs, params = get_model_complexity_info(model, input_size)#, as_strings=True)#, print_per_layer_stat=True)
-
-    # print(f"Number of MACs: {macs}")
-    # print(f"Number of parameters: {params}")
-
-    return macs, params
-
-def get_model_output_shape(model, input_size):
-    dummy_input = torch.randn(1, *input_size)
-
-    model.eval() # set model to eval mode
-    with torch.no_grad(): # save memory
-        output = model(dummy_input)
-    
-    print(output.shape)
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)

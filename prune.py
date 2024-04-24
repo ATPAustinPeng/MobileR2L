@@ -243,13 +243,6 @@ def main(**kwargs):
     logger.info(f"CFG: {cfg}")
     
     # ensure all devices have the CFG before initializing new model
-    if is_main_process():
-        exp_weight_dir = engine.buffer.weight_dir
-        with open(os.path.join(exp_weight_dir, 'cfg.json'), 'w') as f:
-                json.dump(cfg, f)
-        
-        torch.save(cfg_mask, os.path.join(exp_weight_dir, 'cfg_mask.pth'))
-
     dist.barrier()
 
     # initialize new model
@@ -344,6 +337,18 @@ def main(**kwargs):
 
     logger.info("Successfully pruned model.")
 
+    del engine
+    del model
+    engine = newengine
+    print(engine.engine)
+
+    if is_main_process():
+        exp_weight_dir = engine.buffer.weight_dir
+        with open(os.path.join(exp_weight_dir, 'cfg.json'), 'w') as f:
+                json.dump(cfg, f)
+        
+        torch.save(cfg_mask, os.path.join(exp_weight_dir, 'cfg_mask.pth'))
+
     if args.run_render:
         logger.info('Starting rendering. \n')
         # render testset
@@ -365,11 +370,11 @@ def main(**kwargs):
 
     print("Saved pruned model.")
     return
-    
-    del engine
-    del model
 
-    engine = newengine
+    # del engine
+    # del model
+
+    # engine = newengine
 
     # # model should be different now
     # engine.save_arch("pruned_arch.txt")

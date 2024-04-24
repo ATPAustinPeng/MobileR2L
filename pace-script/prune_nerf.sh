@@ -15,10 +15,11 @@ cd /home/hice1/apeng39/scratch/SENeLF/MobileR2L
 
 nGPU=$1
 scene=$2
-project_name="${scene}-pruned"
 ckpt_dir=$3
 prune_percentage_str=$4
 prune_percentage=$((prune_percentage_str))
+project_name="${scene}-prune${prune_percentage}"
+
 
 ncpu_cores=$(nproc --all)
 omp_num_threads=$((ncpu_cores / nGPU))
@@ -49,10 +50,6 @@ OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU prune.py \
     --output_height 800 \
     --output_width 800 \
     --scene $scene \
-    --i_weights 1000 \
-    --i_testset 60000 \
-    --i_save_rendering 10000 \
-    --i_video 60000 \
     --amp \
     --lrate 0.0005 \
     --prune_percentage $prune_percentage \
