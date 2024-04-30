@@ -29,7 +29,7 @@ omp_num_threads=$((ncpu_cores / nGPU))
 # [W socket.cpp:464] [c10d] The server socket has failed to bind to 0.0.0.0:25641 (errno: 98 - Address already in use).
 # [E socket.cpp:500] [c10d] The server socket has failed to listen on any local network address.
 
-OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU retrain_pruned_model.py \
+OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU --master_port=25641 retrain_pruned_model.py \
     --project_name $project_name \
     --dataset_type Blender \
     --pseudo_dir model/teacher/ngp_pl/Pseudo/$scene  \

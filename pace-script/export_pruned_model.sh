@@ -29,9 +29,7 @@ omp_num_threads=$((ncpu_cores / nGPU))
 # [W socket.cpp:464] [c10d] The server socket has failed to bind to 0.0.0.0:25641 (errno: 98 - Address already in use).
 # [E socket.cpp:500] [c10d] The server socket has failed to listen on any local network address.
 
-# Note: for prune.py ONLY, num_iters = number of additional iters to train on top of checkpoint
-# OMP_NUM_THREADS=$omp_num_threads python3 -m torch.distributed.launch --nproc_per_node=$nGPU --master_port=25641 --use_env prune.py \
-OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU export_pruned_model.py \
+OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU --master_port=25641 export_pruned_model.py \
     --project_name $project_name \
     --dataset_type Blender \
     --pseudo_dir model/teacher/ngp_pl/Pseudo/$scene  \
@@ -39,16 +37,16 @@ OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU export_pruned_m
     --run_render \
     --num_workers 12 \
     --batch_size 10 \
-    --num_iters 80000 \
+    --num_iters 100000 \
     --input_height 100 \
     --input_width 100 \
     --output_height 800 \
     --output_width 800 \
     --scene $scene \
     --i_weights 1000 \
-    --i_testset 60000 \
+    --i_testset 10000 \
     --i_save_rendering 10000 \
-    --i_video 60000 \
+    --i_video 10000 \
     --amp \
     --lrate 0.0005 \
     --ckpt_dir $ckpt_dir \

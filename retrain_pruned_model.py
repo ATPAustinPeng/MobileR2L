@@ -191,10 +191,6 @@ def main(**kwargs):
                 if layer_id_in_cfg < len(cfg_mask):
                     end_mask = cfg_mask[layer_id_in_cfg]
             else:
-            #     m1.weight.data = m0.weight.data[idx1.tolist()].clone()
-            #     m1.bias.data = m0.bias.data[idx1.tolist()].clone()
-            #     m1.running_mean = m0.running_mean[idx1.tolist()].clone()
-            #     m1.running_var = m0.running_var[idx1.tolist()].clone()
                 layer_id_in_cfg += 1
                 start_mask = end_mask.clone()
                 if layer_id_in_cfg < len(cfg_mask):  # do not change in Final FC

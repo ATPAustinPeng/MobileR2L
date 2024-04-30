@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=benchmarking_nerf_from_ckpt.sh
+#SBATCH --job-name=export_model.sh
 #SBATCH --output=%x.%j.out
 #SBATCH --error=%x.%j.err
 #SBATCH -t 0-04:00:00
@@ -16,6 +16,7 @@ cd /home/hice1/apeng39/scratch/SENeLF/MobileR2L
 nGPU=$1
 scene=$2
 ckpt_dir=$3
+
 ncpu_cores=$(nproc --all)
 omp_num_threads=$((ncpu_cores / nGPU))
 
@@ -26,6 +27,7 @@ OMP_NUM_THREADS=$omp_num_threads torchrun --nproc_per_node=$nGPU main.py \
     --pseudo_dir model/teacher/ngp_pl/Pseudo/$scene  \
     --root_dir dataset/nerf_synthetic \
     --run_train \
+    --export_onnx \
     --num_workers 12 \
     --batch_size 10 \
     --num_iters 600000 \

@@ -281,6 +281,10 @@ class R2LEngine():
                 mse2psnr(self.buffer.loss).item()
             )
         self.scaler.scale(self.buffer.loss).backward()
+
+        if self.args.penalize_bn:
+            updateBN()
+
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad()
@@ -627,6 +631,11 @@ class R2LEngine():
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = new_lrate
         self._register('lr', new_lrate)
+
+    def updateBN():
+        for m in self.engine.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.weight.grad.data.add_(args.s*torch.sign(m.weight.data)) # L1
 
     @main_process
     def save_prune_txt(self, mode=None, cfg=None, filename="prune.txt"):

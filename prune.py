@@ -166,30 +166,11 @@ def main(**kwargs):
     if args.export_onnx:
         engine.export_onnx()
         exit(0)
-
-    ############################## PREPRUNE ##############################
-    # perform test and video rendering; export onnx for coremltools
-    # if args.run_render:
-    #     logger.info('Starting rendering. \n')
-    #     # render testset
-    #     engine.render(
-    #         c2ws=test_poses,
-    #         gt_imgs=test_images,
-    #         global_step=0,
-    #         save_rendering=True
-    #     )
-    #     # render videos
-    #     if video_poses is not None:
-    #         engine.render(
-    #             c2ws=video_poses,
-    #             gt_imgs=None,
-    #             global_step=0,
-    #             save_video=True
-    #         )
-
-        # engine.export_onnx(extra_path="-preprune")
-        
+    
+    
     # https://github.com/Eric-mingjie/rethinking-network-pruning/blob/master/cifar/network-slimming/resprune.py
+
+    #################### CALCULATE PRUNING CONFIG ####################
     logger.info("Calculate pruning config.\n")
 
     # count # of BN weights
@@ -249,6 +230,7 @@ def main(**kwargs):
     newengine = R2LEngine(dataset_info, logger, args, cfg=cfg)
     newmodel = newengine.engine
 
+    #################### PERFORM PRUNING ####################
     old_modules = list()
     new_modules = list()
     for n, m in model.named_modules():
@@ -339,6 +321,7 @@ def main(**kwargs):
 
     del engine
     del model
+    
     engine = newengine
     print(engine.engine)
 
